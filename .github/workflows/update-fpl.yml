@@ -1,9 +1,15 @@
+name: Run FPL update script
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   run-script:
     runs-on: ubuntu-latest
     env:
-      PYTHONUNBUFFERED: "1"   # tvinga obuffrad output
+      PYTHONUNBUFFERED: "1"
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -15,6 +21,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
           python -V
           pip show pandas requests streamlit || true
