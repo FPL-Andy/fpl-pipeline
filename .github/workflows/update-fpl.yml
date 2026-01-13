@@ -2,6 +2,8 @@
 jobs:
   run-script:
     runs-on: ubuntu-latest
+    env:
+      PYTHONUNBUFFERED: "1"   # tvinga obuffrad output
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -14,6 +16,15 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt
+          python -V
+          pip show pandas requests streamlit || true
+
+      - name: Sanity check workspace
+        run: |
+          set -x
+          pwd
+          ls -la
+          echo "Git ref: $GITHUB_SHA"
 
       - name: Run FPL update script
         env:
