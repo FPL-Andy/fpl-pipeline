@@ -1,0 +1,35 @@
+
+name: Update FPL Data
+
+on:
+  schedule:
+    - cron: "0 5 * * *"   # kör dagligen kl 05:00 (Stockholm-tid ~06:00 när sommartid varierar)
+  workflow_dispatch:      # gör att du kan starta manuellt
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run FPL update script
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          SUPABASE_SCHEMA: ${{ secrets.SUPABASE_SCHEMA }}
+          SUPABASE_TABLE_PLAYERS: ${{ secrets.SUPABASE_TABLE_PLAYERS }}
+          SUPABASE_TABLE_FIXTURES: ${{ secrets.SUPABASE_TABLE_FIXTURES }}
+          SUPABASE_TABLE_EVENTS: ${{ secrets.SUPABASE_TABLE_EVENTS }}
+        run: |
+          python script.py
+``
