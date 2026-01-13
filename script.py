@@ -1,7 +1,6 @@
 
 import os
 import json
-import time
 from datetime import datetime, timezone
 
 import requests
@@ -17,66 +16,91 @@ ENDPOINT_FIXTURES = f"{FPL_BASE}/fixtures/"
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# Supabase (valfritt – om dessa inte finns hoppar vi över DB-insättning)
+# Supabase (REST)
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
-SUPABASE_SCHEMA = os.getenv("SUPABASE_SCHEMA", "public")
 TABLE_PLAYERS = os.getenv("SUPABASE_TABLE_PLAYERS", "fpl_players")
 TABLE_FIXTURES = os.getenv("SUPABASE_TABLE_FIXTURES", "fpl_fixtures")
-TABLE_EVENTS = os.getenv("SUPABASE_TABLE_EVENTS", "fpl_events_live")
 
 SESSION = requests.Session()
-SESSION.headers.update({
-    "apikey": SUPABASE_KEY,
-    "Authorization": f"Bearer {SUPABASE_KEY}",
-    "Content-Type": "application/json"
-})
 
 def ts():
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%SZ")
 
 def http_get_json(url):
-    r = SESSION.get(url, timeout=30)
+    r = SESSION.get(url, timeout=45, headers={"User-Agent": "FPL-Pipeline/1.0"})
     r.raise_for_status()
     return r.json()
 
 def save_json(data, name):
-    path = f"data/{name}_{ts()}.json"
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2)
+    path = os.path.join(DATA_DIR, f"{name}_{ts()}.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
     return path
 
-def supabase_upsert(table, rows):
+def supabase_insert(table, rows):
+    """Skickar LISTA med dicts. Loggar status + feltext vid misslyckande."""
     if not SUPABASE_URL or not SUPABASE_KEY:
-        print("No Supabase credentials")
+        print("❗ No Supabase credentials; skipping DB insert")
         return
 
     url = f"{SUPABASE_URL}/rest/v1/{table}?on_conflict=id"
-    resp = SESSION.post(url, data=json.dumps(rows), timeout=60)
-    print(f"Supabase insert to {table}: {resp.status_code} {resp.text}")
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates"
+    }
+    resp = SESSION.post(url, headers=headers, data=json.dumps(rows))
+    ok = "OK" if resp.ok else "ERROR"
+    print(f"→ Supabase insert {table}: {resp.status_code} {ok}")
+    if not resp.ok:
+        print("Response text:", resp.text[:500])  # logga ev. felorsak
+
+def filter_columns(df: pd.DataFrame, allowed: list[str]) -> pd.DataFrame:
+    present = [c for c in allowed if c in df.columns]
+    # saknade kolumner fyller vi med None (så att payload matchar tabellen)
+    for c in allowed:
+        if c not in df.columns:
+            df[c] = None
+    return df[present + [c for c in allowed if c not in present]]
 
 def main():
     print("== FPL pipeline start ==")
 
-    # ----- PLAYERS / BOOTSTRAP -----
+    # ----- BOOTSTRAP / PLAYERS -----
     bootstrap = http_get_json(ENDPOINT_BOOTSTRAP)
     save_json(bootstrap, "bootstrap")
 
-    players = pd.json_normalize(bootstrap["elements"])
-    players_records = players.where(pd.notnull(players), None).to_dict(orient="records")
+    players_df = pd.json_normalize(bootstrap.get("elements", []))
+    print(f"Players in source: {len(players_df)}")
 
-    print(f"Players found: {len(players_records)}")
-    supabase_upsert(TABLE_PLAYERS, players_records)
+    # ★ behåll bara de kolumner som finns i din fpl_players-tabell
+    players_allowed = [
+        "id", "first_name", "second_name", "web_name", "team",
+        "now_cost", "total_points", "selected_by_percent", "minutes",
+        "form", "ep_next", "ep_this"
+    ]
+    players_clean = filter_columns(players_df, players_allowed).where(pd.notnull(players_df), None)
+    players_records = players_clean.to_dict(orient="records")
 
     # ----- FIXTURES -----
     fixtures = http_get_json(ENDPOINT_FIXTURES)
     save_json(fixtures, "fixtures")
 
     fixtures_df = pd.json_normalize(fixtures)
-    fixtures_records = fixtures_df.where(pd.notnull(fixtures_df), None).to_dict(orient="records")
+    print(f"Fixtures in source: {len(fixtures_df)}")
 
-    print(f"Fixtures found: {len(fixtures_records)}")
-    supabase_upsert(TABLE_FIXTURES, fixtures_records)
+    fixtures_allowed = [
+        "id", "event", "team_h", "team_a", "team_h_score", "team_a_score",
+        "kickoff_time", "finished", "started", "minutes", "stats"
+    ]
+    fixtures_clean = filter_columns(fixtures_df, fixtures_allowed).where(pd.notnull(fixtures_df), None)
+    fixtures_records = fixtures_clean.to_dict(orient="records")
+
+    # ----- WRITE TO SUPABASE -----
+    supabase_insert(TABLE_PLAYERS, players_records)
+    supabase_insert(TABLE_FIXTURES, fixtures_records)
 
     print("== FPL pipeline end ==")
 
