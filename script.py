@@ -51,8 +51,7 @@ def supabase_insert(table: str, records: list[dict]):
         "Content-Type": "application/json",
         "Prefer": "resolution=merge-duplicates"
     }
-    # Viktigt: blockera NaN i JSON (annars blir payload ogiltig)
-    payload = json.dumps(records, allow_nan=False)
+    payload = json.dumps(records, allow_nan=False)  # stoppa NaN/Inf
     resp = SESSION.post(url, headers=headers, data=payload, timeout=60)
     ok = "OK" if resp.ok else "ERROR"
     print(f"→ Supabase insert {table}: {resp.status_code} {ok}")
@@ -68,11 +67,7 @@ def filter_columns(df: pd.DataFrame, allowed: list[str]) -> pd.DataFrame:
     return out[allowed]
 
 def clean_df_for_json(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Gör df JSON-säker:
-    - Ersätt ±Inf med None
-    - Ersätt NaN med None
-    """
+    """Gör df JSON-säker: ersätt ±Inf/NaN med None."""
     out = df.replace([np.inf, -np.inf], np.nan)
     out = out.where(pd.notnull(out), None)
     return out
@@ -104,18 +99,13 @@ def main():
     fixtures_df = pd.json_normalize(fixtures)
     print(f"Fixtures in source: {len(fixtures_df)}")
 
+    # NOTE: Vi tar bort 'stats' för att hålla det stabilt (kan innehålla ogiltiga värden).
     fixtures_allowed = [
         "id", "event", "team_h", "team_a", "team_h_score", "team_a_score",
-        "kickoff_time", "finished", "started", "minutes", "stats"
+        "kickoff_time", "finished", "started", "minutes"
+        # "stats"  <-- borttagen för enkelhet och stabilitet
     ]
     fixtures_clean = filter_columns(fixtures_df, fixtures_allowed)
-
-    # Se till att 'stats' alltid är giltig JSON (lista/dict). Annars tom lista.
-    def _fix_stats(x):
-        return x if isinstance(x, (list, dict)) else []
-    if "stats" in fixtures_clean.columns:
-        fixtures_clean["stats"] = fixtures_clean["stats"].apply(_fix_stats)
-
     fixtures_clean = clean_df_for_json(fixtures_clean)
     fixtures_records = fixtures_clean.to_dict(orient="records")
 
@@ -127,3 +117,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
