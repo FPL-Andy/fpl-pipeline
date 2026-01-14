@@ -11,7 +11,7 @@ import pandas as pd
 # -----------------------------
 FPL_BASE = "https://fantasy.premierleague.com/api"
 ENDPOINT_BOOTSTRAP = f"{FPL_BASE}/bootstrap-static/"
-ENDPOINT_FIXTURES = f"{FPL_BASE}/fixtures/"
+ENDPOINT_FIXTURES  = f"{FPL_BASE}/fixtures/"
 
 DATA_DIR = "data"
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -38,12 +38,11 @@ def save_json(data, name):
         json.dump(data, f, ensure_ascii=False, indent=2)
     return path
 
-def supabase_insert(table, rows):
-    """Skickar LISTA med dicts. Loggar status + feltext vid misslyckande."""
+def supabase_insert(table: str, records: list[dict]):
+    """Skicka LISTA av dictar till Supabase. Loggar status + feltext."""
     if not SUPABASE_URL or not SUPABASE_KEY:
         print("❗ No Supabase credentials; skipping DB insert")
         return
-
     url = f"{SUPABASE_URL}/rest/v1/{table}?on_conflict=id"
     headers = {
         "apikey": SUPABASE_KEY,
@@ -51,40 +50,43 @@ def supabase_insert(table, rows):
         "Content-Type": "application/json",
         "Prefer": "resolution=merge-duplicates"
     }
-    resp = SESSION.post(url, headers=headers, data=json.dumps(rows))
+    # Viktigt: blockera NaN i JSON (annars blir payload ogiltig)
+    payload = json.dumps(records, allow_nan=False)
+    resp = SESSION.post(url, headers=headers, data=payload, timeout=60)
     ok = "OK" if resp.ok else "ERROR"
     print(f"→ Supabase insert {table}: {resp.status_code} {ok}")
     if not resp.ok:
-        print("Response text:", resp.text[:500])  # logga ev. felorsak
+        print("Response text:", resp.text[:1000])
 
 def filter_columns(df: pd.DataFrame, allowed: list[str]) -> pd.DataFrame:
-    present = [c for c in allowed if c in df.columns]
-    # saknade kolumner fyller vi med None (så att payload matchar tabellen)
+    """Behåll ENBART kolumner som finns i tabellen. Lägg till saknade som None."""
+    out = df.copy()
     for c in allowed:
-        if c not in df.columns:
-            df[c] = None
-    return df[present + [c for c in allowed if c not in present]]
+        if c not in out.columns:
+            out[c] = None
+    return out[allowed]
 
 def main():
+    print(">>> script.py startar...", flush=True)
     print("== FPL pipeline start ==")
 
-    # ----- BOOTSTRAP / PLAYERS -----
+    # -------- PLAYERS --------
     bootstrap = http_get_json(ENDPOINT_BOOTSTRAP)
     save_json(bootstrap, "bootstrap")
 
     players_df = pd.json_normalize(bootstrap.get("elements", []))
     print(f"Players in source: {len(players_df)}")
 
-    # ★ behåll bara de kolumner som finns i din fpl_players-tabell
     players_allowed = [
         "id", "first_name", "second_name", "web_name", "team",
         "now_cost", "total_points", "selected_by_percent", "minutes",
         "form", "ep_next", "ep_this"
     ]
-    players_clean = filter_columns(players_df, players_allowed).where(pd.notnull(players_df), None)
+    players_clean = filter_columns(players_df, players_allowed)
+    players_clean = players_clean.where(pd.notnull(players_clean), None)
     players_records = players_clean.to_dict(orient="records")
 
-    # ----- FIXTURES -----
+    # -------- FIXTURES --------
     fixtures = http_get_json(ENDPOINT_FIXTURES)
     save_json(fixtures, "fixtures")
 
@@ -95,10 +97,18 @@ def main():
         "id", "event", "team_h", "team_a", "team_h_score", "team_a_score",
         "kickoff_time", "finished", "started", "minutes", "stats"
     ]
-    fixtures_clean = filter_columns(fixtures_df, fixtures_allowed).where(pd.notnull(fixtures_df), None)
+    fixtures_clean = filter_columns(fixtures_df, fixtures_allowed)
+    fixtures_clean = fixtures_clean.where(pd.notnull(fixtures_clean), None)
+
+    # Se till att 'stats' alltid är giltig JSON (lista/dict). Annars tom lista.
+    def _fix_stats(x):
+        return x if isinstance(x, (list, dict)) else []
+    if "stats" in fixtures_clean.columns:
+        fixtures_clean["stats"] = fixtures_clean["stats"].apply(_fix_stats)
+
     fixtures_records = fixtures_clean.to_dict(orient="records")
 
-    # ----- WRITE TO SUPABASE -----
+    # -------- WRITE TO SUPABASE --------
     supabase_insert(TABLE_PLAYERS, players_records)
     supabase_insert(TABLE_FIXTURES, fixtures_records)
 
