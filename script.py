@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 import requests
 import pandas as pd
+import numpy as np
 
 # -----------------------------
 # Grundkonfiguration
@@ -38,12 +39,11 @@ def save_json(data, name):
         json.dump(data, f, ensure_ascii=False, indent=2)
     return path
 
-def supabase_insert(table: str, records: list[dict]):
-    """Skicka LISTA av dictar till Supabase. Loggar status + ev. feltext."""
+def supabase_post_json(table: str, json_payload: str):
+    """Skicka en FÄRDIG JSON-sträng (array med objekt) till Supabase."""
     if not SUPABASE_URL or not SUPABASE_KEY:
         print("❗ No Supabase credentials; skipping DB insert")
         return
-
     url = f"{SUPABASE_URL}/rest/v1/{table}?on_conflict=id"
     headers = {
         "apikey": SUPABASE_KEY,
@@ -51,32 +51,60 @@ def supabase_insert(table: str, records: list[dict]):
         "Content-Type": "application/json",
         "Prefer": "resolution=merge-duplicates"
     }
-
-    payload = json.dumps(records, ensure_ascii=False)  # records är redan JSON-säkra
-    resp = SESSION.post(url, headers=headers, data=payload, timeout=60)
+    resp = SESSION.post(url, headers=headers, data=json_payload, timeout=60)
     ok = "OK" if resp.ok else "ERROR"
     print(f"→ Supabase insert {table}: {resp.status_code} {ok}")
     if not resp.ok:
         print("Response text:", resp.text[:1000])
 
-def filter_columns(df: pd.DataFrame, allowed: list[str]) -> pd.DataFrame:
-    """Behåll ENBART kolumner som finns i tabellen. Lägg till saknade som None."""
+# -----------------------------
+# Hjälpfunktioner för typning
+# -----------------------------
+def keep_only(df: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
+    """Behåll ENDAST tabellens kolumner. Lägg till saknade som None."""
     out = df.copy()
-    for c in allowed:
+    for c in columns:
         if c not in out.columns:
             out[c] = None
-    return out[allowed]
+    return out[columns]
 
-def df_to_jsonsafe_records(df: pd.DataFrame) -> list[dict]:
-    """
-    Gör DataFrame JSON-säker via en 'round-trip':
-    - pandas .to_json(orient='records', date_format='iso') ersätter NaN/Inf med null
-    - json.loads ger tillbaka Python-list[dict] utan NaN/Inf/NaT
-    """
-    # Orient='records' → lista med objekt; date_format='iso' → ISO-strängar
-    as_json_str = df.to_json(orient="records", date_format="iso")
-    return json.loads(as_json_str)
+def coerce_int(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    """Tvinga kolumner till heltal (nullable Int64)."""
+    for c in cols:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").astype("Int64")
+    return df
 
+def coerce_bool(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    """Tvinga kolumner till boolean (nullable)."""
+    for c in cols:
+        if c in df.columns:
+            # till booleans via sannings-tabell
+            df[c] = df[c].map({True: True, False: False, 1: True, 0: False}).astype("boolean")
+    return df
+
+def coerce_ts_iso(df: pd.DataFrame, col: str) -> pd.DataFrame:
+    """Gör tidskolumn till ISO-sträng (UTC) eller None."""
+    if col in df.columns:
+        dt = pd.to_datetime(df[col], errors="coerce", utc=True)
+        # ISO med 'Z' på slutet; None för NaT
+        df[col] = dt.dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+        df.loc[dt.isna(), col] = None
+    return df
+
+def df_to_json_payload(df: pd.DataFrame) -> str:
+    """
+    Gör df JSON-säker och returnera färdig JSON-sträng (lista med objekt):
+    - ersätt NaN/NaT med None
+    - serialisera till ISO-strängar där det behövs
+    - allow_nan=False garanterar giltig JSON (inga NaN/Inf)
+    """
+    out = df.where(pd.notnull(df), None)
+    return out.to_json(orient="records", date_format="iso", allow_nan=False)
+
+# -----------------------------
+# Huvudflöde
+# -----------------------------
 def main():
     print(">>> script.py startar...", flush=True)
     print("== FPL pipeline start ==")
@@ -93,8 +121,10 @@ def main():
         "now_cost", "total_points", "selected_by_percent", "minutes",
         "form", "ep_next", "ep_this"
     ]
-    players_clean = filter_columns(players_df, players_allowed)
-    players_records = df_to_jsonsafe_records(players_clean)
+    players_clean = keep_only(players_df, players_allowed)
+    players_clean = coerce_int(players_clean, ["id", "team", "now_cost", "total_points", "minutes"])
+    # övriga får vara text/float som JSON – PostgREST mappar fint
+    players_payload = df_to_json_payload(players_clean)
 
     # -------- FIXTURES --------
     fixtures = http_get_json(ENDPOINT_FIXTURES)
@@ -103,20 +133,28 @@ def main():
     fixtures_df = pd.json_normalize(fixtures)
     print(f"Fixtures in source: {len(fixtures_df)}")
 
-    # För stabilitet nu: skicka EJ 'stats' (kan innehålla listor/konstiga värden).
+    # Skicka EJ 'stats' (stabilitet först)
     fixtures_allowed = [
         "id", "event", "team_h", "team_a", "team_h_score", "team_a_score",
         "kickoff_time", "finished", "started", "minutes"
     ]
-    fixtures_clean = filter_columns(fixtures_df, fixtures_allowed)
-    fixtures_records = df_to_jsonsafe_records(fixtures_clean)
+    fixtures_clean = keep_only(fixtures_df, fixtures_allowed)
+    fixtures_clean = coerce_int(fixtures_clean,
+        ["id", "event", "team_h", "team_a", "team_h_score", "team_a_score", "minutes"]
+    )
+    fixtures_clean = coerce_bool(fixtures_clean, ["finished", "started"])
+    fixtures_clean = coerce_ts_iso(fixtures_clean, "kickoff_time")
+
+    # (debug) – ta bort om du vill när det funkar
+    print("Fixtures dtypes:", fixtures_clean.dtypes.to_dict())
+
+    fixtures_payload = df_to_json_payload(fixtures_clean)
 
     # -------- WRITE TO SUPABASE --------
-    supabase_insert(TABLE_PLAYERS, players_records)
-    supabase_insert(TABLE_FIXTURES, fixtures_records)
+    supabase_post_json(TABLE_PLAYERS, players_payload)
+    supabase_post_json(TABLE_FIXTURES, fixtures_payload)
 
     print("== FPL pipeline end ==")
 
 if __name__ == "__main__":
     main()
-
