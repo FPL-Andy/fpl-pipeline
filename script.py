@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 
 import requests
 import pandas as pd
-import numpy as np
 
 # -----------------------------
 # Grundkonfiguration
@@ -40,10 +39,11 @@ def save_json(data, name):
     return path
 
 def supabase_insert(table: str, records: list[dict]):
-    """Skicka LISTA av dictar till Supabase. Loggar status + feltext."""
+    """Skicka LISTA av dictar till Supabase. Loggar status + ev. feltext."""
     if not SUPABASE_URL or not SUPABASE_KEY:
         print("❗ No Supabase credentials; skipping DB insert")
         return
+
     url = f"{SUPABASE_URL}/rest/v1/{table}?on_conflict=id"
     headers = {
         "apikey": SUPABASE_KEY,
@@ -51,7 +51,8 @@ def supabase_insert(table: str, records: list[dict]):
         "Content-Type": "application/json",
         "Prefer": "resolution=merge-duplicates"
     }
-    payload = json.dumps(records, allow_nan=False)  # stoppa NaN/Inf
+
+    payload = json.dumps(records, ensure_ascii=False)  # records är redan JSON-säkra
     resp = SESSION.post(url, headers=headers, data=payload, timeout=60)
     ok = "OK" if resp.ok else "ERROR"
     print(f"→ Supabase insert {table}: {resp.status_code} {ok}")
@@ -66,11 +67,15 @@ def filter_columns(df: pd.DataFrame, allowed: list[str]) -> pd.DataFrame:
             out[c] = None
     return out[allowed]
 
-def clean_df_for_json(df: pd.DataFrame) -> pd.DataFrame:
-    """Gör df JSON-säker: ersätt ±Inf/NaN med None."""
-    out = df.replace([np.inf, -np.inf], np.nan)
-    out = out.where(pd.notnull(out), None)
-    return out
+def df_to_jsonsafe_records(df: pd.DataFrame) -> list[dict]:
+    """
+    Gör DataFrame JSON-säker via en 'round-trip':
+    - pandas .to_json(orient='records', date_format='iso') ersätter NaN/Inf med null
+    - json.loads ger tillbaka Python-list[dict] utan NaN/Inf/NaT
+    """
+    # Orient='records' → lista med objekt; date_format='iso' → ISO-strängar
+    as_json_str = df.to_json(orient="records", date_format="iso")
+    return json.loads(as_json_str)
 
 def main():
     print(">>> script.py startar...", flush=True)
@@ -89,8 +94,7 @@ def main():
         "form", "ep_next", "ep_this"
     ]
     players_clean = filter_columns(players_df, players_allowed)
-    players_clean = clean_df_for_json(players_clean)
-    players_records = players_clean.to_dict(orient="records")
+    players_records = df_to_jsonsafe_records(players_clean)
 
     # -------- FIXTURES --------
     fixtures = http_get_json(ENDPOINT_FIXTURES)
@@ -99,15 +103,13 @@ def main():
     fixtures_df = pd.json_normalize(fixtures)
     print(f"Fixtures in source: {len(fixtures_df)}")
 
-    # NOTE: Vi tar bort 'stats' för att hålla det stabilt (kan innehålla ogiltiga värden).
+    # För stabilitet nu: skicka EJ 'stats' (kan innehålla listor/konstiga värden).
     fixtures_allowed = [
         "id", "event", "team_h", "team_a", "team_h_score", "team_a_score",
         "kickoff_time", "finished", "started", "minutes"
-        # "stats"  <-- borttagen för enkelhet och stabilitet
     ]
     fixtures_clean = filter_columns(fixtures_df, fixtures_allowed)
-    fixtures_clean = clean_df_for_json(fixtures_clean)
-    fixtures_records = fixtures_clean.to_dict(orient="records")
+    fixtures_records = df_to_jsonsafe_records(fixtures_clean)
 
     # -------- WRITE TO SUPABASE --------
     supabase_insert(TABLE_PLAYERS, players_records)
@@ -117,4 +119,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
+
