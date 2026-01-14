@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 import requests
 import pandas as pd
+import numpy as np
 
 # -----------------------------
 # Grundkonfiguration
@@ -66,6 +67,16 @@ def filter_columns(df: pd.DataFrame, allowed: list[str]) -> pd.DataFrame:
             out[c] = None
     return out[allowed]
 
+def clean_df_for_json(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Gör df JSON-säker:
+    - Ersätt ±Inf med None
+    - Ersätt NaN med None
+    """
+    out = df.replace([np.inf, -np.inf], np.nan)
+    out = out.where(pd.notnull(out), None)
+    return out
+
 def main():
     print(">>> script.py startar...", flush=True)
     print("== FPL pipeline start ==")
@@ -83,7 +94,7 @@ def main():
         "form", "ep_next", "ep_this"
     ]
     players_clean = filter_columns(players_df, players_allowed)
-    players_clean = players_clean.where(pd.notnull(players_clean), None)
+    players_clean = clean_df_for_json(players_clean)
     players_records = players_clean.to_dict(orient="records")
 
     # -------- FIXTURES --------
@@ -98,7 +109,6 @@ def main():
         "kickoff_time", "finished", "started", "minutes", "stats"
     ]
     fixtures_clean = filter_columns(fixtures_df, fixtures_allowed)
-    fixtures_clean = fixtures_clean.where(pd.notnull(fixtures_clean), None)
 
     # Se till att 'stats' alltid är giltig JSON (lista/dict). Annars tom lista.
     def _fix_stats(x):
@@ -106,6 +116,7 @@ def main():
     if "stats" in fixtures_clean.columns:
         fixtures_clean["stats"] = fixtures_clean["stats"].apply(_fix_stats)
 
+    fixtures_clean = clean_df_for_json(fixtures_clean)
     fixtures_records = fixtures_clean.to_dict(orient="records")
 
     # -------- WRITE TO SUPABASE --------
